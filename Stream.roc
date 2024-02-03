@@ -6,12 +6,19 @@ interface Stream exposes [
         foldl,
         foldr,
         return,
+        append,
         repeat,
         take,
         zip,
         countFrom,
         enumerate,
         concatMap,
+        drop,
+        head,
+        take,
+        unstreamOntoEnd,
+        unsstreamWithCapacity,
+        either,
     ] imports []
 
 # ## Functions from Coutts et al.
@@ -180,3 +187,52 @@ take = \Stream next s0, n0 ->
         else
             Stop
     Stream next1 { s: s0, n: n0 }
+
+drop = \Stream next s0, n0 ->
+    next1 = \{ s, n } ->
+        if n > 0 then
+            when next s is
+                Yield _ s1 -> Skip { s: s1, n: n - 1 }
+                Skip s1 -> Skip { s: s1, n }
+                Stop -> Stop
+        else
+            when next s is
+                Yield val s1 -> Yield val { s: s1, n }
+                Skip s1 -> Skip { s: s1, n }
+                Stop -> Stop
+    Stream next1 { s: s0, n: n0 }
+
+head = \Stream next s ->
+    when next s is
+        Yield val _ -> Ok val
+        Skip s1 -> head (Stream next s1)
+        Stop -> Err OutOfBounds
+
+unstreamOntoEnd : Stream a s, List a -> List a
+unstreamOntoEnd = \Stream next s, list ->
+    loop = \list1, s1 ->
+        when next s1 is
+            Yield val s2 -> loop (List.append list1 val) s2
+            Skip s2 -> loop list1 s2
+            Stop -> list1
+    loop list s
+
+unsstreamWithCapacity : Stream a s, Nat -> List a
+unsstreamWithCapacity = \Stream next s, capacity ->
+    unstreamOntoEnd (Stream next s) (List.withCapacity capacity)
+
+either = \Stream nextLeft sLeft, Stream nextRight sRight, which ->
+    # FIXME: does this impede optimisaton?
+    loop = \state ->
+        when state is
+            LeftState s1 -> when nextLeft s1 is
+                Yield val s2 -> Yield val (LeftState s2)
+                Skip s2 -> Skip (LeftState s2)
+                Stop -> Stop
+            RightState s1 -> when nextRight s1 is
+                Yield val s2 -> Yield val (RightState s2)
+                Skip s2 -> Skip (RightState s2)
+                Stop -> Stop
+    when which is
+        Left -> Stream loop (LeftState sLeft)
+        Right -> Stream loop (RightState sRight)
