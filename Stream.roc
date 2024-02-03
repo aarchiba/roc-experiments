@@ -244,3 +244,98 @@ either = \Stream nextLeft sLeft, Stream nextRight sRight, which ->
     when which is
         Left -> thunkStream (Stream nextLeft sLeft)
         Right -> thunkStream (Stream nextRight sRight)
+
+# Can we write a "yield" keyword?
+
+# A YieldValue captures a value and a continuation
+# A function that wants to be inside a generator should
+# return a YieldValue for the first value to be yielded
+# and then a continuation that will be called with {} to
+# get the next value to be yielded, or stop.
+YieldValue a : [YieldValue a ({} -> YieldValue a), Stop]
+
+demoYield : Nat -> YieldValue Nat
+demoYield = \n ->
+    {} <- YieldValue n
+    {} <- YieldValue (n + 1)
+    {} <- YieldValue (n + 2)
+    {} <- YieldValue (n + 3)
+    Stop
+
+demoYield3 = \n ->
+    {} <- YieldValue n
+    demoYield n
+
+# YieldValue functions work recursively
+demoYield4 = \n ->
+    {} <- YieldValue n
+    demoYield4 (n + 2)
+
+# walkYield converts function producing YieldValues into a list
+# directly; this isn't really meant to be used - apply generator,
+# below, to get a stream and then do things with that - but it's
+# useful for testing.
+walkYield : List Nat, YieldValue Nat -> List Nat
+walkYield = \list, thing ->
+    when thing is
+        YieldValue n f -> walkYield (List.append list n) (f {})
+        Stop -> list
+
+expect (walkYield [] (demoYield 1)) == [1, 2, 3, 4]
+expect (walkYield [] (demoYield3 1)) == [1, 1, 2, 3, 4]
+
+# Convert a YieldValue into a Stream; this is probably
+# best used internal to generator, below.
+streamYield : YieldValue a -> Stream a (YieldValue a)
+streamYield = \g ->
+    loop = \yv ->
+        when yv is
+            YieldValue val f -> Yield val (f {})
+            Stop -> Stop
+    Stream loop g
+
+expect (streamYield (demoYield 1) |> unstream) == [1, 2, 3, 4]
+expect (streamYield (demoYield4 1) |> take 4 |> unstream) == [1, 3, 5, 7]
+
+# Test generator yielding the contents of a list
+yieldFromList : List a -> YieldValue a
+yieldFromList = \list ->
+    when list is
+        [] -> Stop
+        [x, .. as xs] ->
+            {} <- YieldValue x
+            yieldFromList xs
+
+expect (streamYield (yieldFromList [1, 2, 3, 4]) |> unstream) == [1, 2, 3, 4]
+
+# This is used to turn a function producing YieldValues into a Stream
+generator = \yv -> streamYield yv
+
+demoYield5 = \n -> generator
+        (
+            {} <- YieldValue n
+            {} <- YieldValue (n + 1)
+            {} <- YieldValue (n + 2)
+            {} <- YieldValue (n + 3)
+            Stop
+        )
+
+expect (demoYield5 1 |> unstream) == [1, 2, 3, 4]
+
+# yieldFrom should take a Stream and produce a YieldValue
+# for each element in the Stream.
+# having some trouble with this one
+# yieldFrom : Stream s a -> YieldValue a
+# yieldFrom = \Stream next s ->
+#     when next s is
+#         Yield val s2 -> YieldValue val (\{} -> yieldFrom (Stream next s2))
+#         Skip s2 -> yieldFrom (Stream next s2)
+#         Stop -> Stop
+
+# demoYield2 : {} -> YieldValue [Red, Blue]
+# demoYield2 = \{} ->
+#     {} <- YieldValue Red
+#     {} <- YieldValue Blue
+#     yieldFrom (streamYield (demoYield2 {}))
+
+# expect streamYield (demoYield2 {}) |> take 5 |> unstream == [Red, Blue, Red, Blue, Red]
