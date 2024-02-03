@@ -19,6 +19,7 @@ interface Stream exposes [
         unstreamOntoEnd,
         unsstreamWithCapacity,
         either,
+        thunkStream,
     ] imports []
 
 # ## Functions from Coutts et al.
@@ -31,6 +32,7 @@ Stream a s : [Stream (s -> Step a s) s]
 
 ListIterationState a : { list : List a, n : Nat }
 
+# fromList
 stream : List a -> Stream a (ListIterationState a)
 stream = \ls ->
     listNext : ListIterationState a -> Step a (ListIterationState a)
@@ -43,15 +45,21 @@ stream = \ls ->
     start = { list: ls, n: 0nat }
     Stream listNext start
 
+# toListAppend
+unstreamIntoList : Stream a s, List a -> List a
+unstreamIntoList = \Stream next s, list ->
+    loop : List a, s -> List a
+    loop = \list1, s1 ->
+        when next s1 is
+            Yield val s2 -> loop (List.append list1 val) s2
+            Skip s2 -> loop list1 s2
+            Stop -> list1
+    loop list s
+
+# toList
 unstream : Stream a s -> List a
 unstream = \Stream next s ->
-    loop : List a, s -> List a
-    loop = \list, s1 ->
-        when next s1 is
-            Yield val s2 -> loop (List.append list val) s2
-            Skip s2 -> loop list s2
-            Stop -> list
-    loop [] s
+    unstreamIntoList (Stream next s) []
 
 expect ([Red, Fish, Blue, Fish] |> stream |> unstream) == [Red, Fish, Blue, Fish]
 
@@ -221,18 +229,18 @@ unsstreamWithCapacity : Stream a s, Nat -> List a
 unsstreamWithCapacity = \Stream next s, capacity ->
     unstreamOntoEnd (Stream next s) (List.withCapacity capacity)
 
+thunkStream : Stream a s -> Stream a ({} -> Step a s)
+thunkStream = \Stream next s ->
+    loop = \f ->
+        when f {} is
+            Yield val s1 -> Yield val (\{} -> next s1)
+            Skip s1 -> Skip (\{} -> next s1)
+            Stop -> Stop
+    Stream loop (\{} -> next s)
+
+expect (countFrom 0 |> take 5 |> unstream) == (countFrom 0 |> thunkStream |> take 5 |> unstream)
+
 either = \Stream nextLeft sLeft, Stream nextRight sRight, which ->
-    # FIXME: does this impede optimisaton?
-    loop = \state ->
-        when state is
-            LeftState s1 -> when nextLeft s1 is
-                Yield val s2 -> Yield val (LeftState s2)
-                Skip s2 -> Skip (LeftState s2)
-                Stop -> Stop
-            RightState s1 -> when nextRight s1 is
-                Yield val s2 -> Yield val (RightState s2)
-                Skip s2 -> Skip (RightState s2)
-                Stop -> Stop
     when which is
-        Left -> Stream loop (LeftState sLeft)
-        Right -> Stream loop (RightState sRight)
+        Left -> thunkStream (Stream nextLeft sLeft)
+        Right -> thunkStream (Stream nextRight sRight)
