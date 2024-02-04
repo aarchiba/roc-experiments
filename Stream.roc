@@ -47,6 +47,7 @@ interface Stream exposes [
         mapMaybe,
         readFromList,
         writeToList,
+        mergeSorted,
         # Dictionary-related operations
         fromDictKeys,
         fromDictValues,
@@ -585,6 +586,38 @@ mapMaybe = \Stream next s, f ->
             Skip s2 -> Skip s2
             Stop -> Stop
     Stream loop s
+
+MergeSortedState a sLeft sRight : { left : [NoValue, Value a, Done], right : [NoValue, Value a, Done], leftNow : sLeft, rightNow : sRight }
+mergeSorted : Stream a sLeft, Stream a sRight, (a, a -> Bool) -> Stream a (MergeSortedState a sLeft sRight)
+mergeSorted = \Stream nextLeft left0, Stream nextRight right0, lessThan ->
+    loop : MergeSortedState a sLeft sRight -> Step a (MergeSortedState a sLeft sRight)
+    loop = \{ left, right, leftNow, rightNow } ->
+        when (left, right) is
+            (Done, Done) -> Stop
+            (NoValue, _) ->
+                when nextLeft leftNow is
+                    Yield val leftNext -> Skip { left: Value val, leftNow: leftNext, right, rightNow }
+                    Skip leftNext -> Skip { left, right, leftNow: leftNext, rightNow }
+                    Stop -> Skip { left: Done, right, leftNow, rightNow }
+
+            (_, NoValue) ->
+                when nextRight rightNow is
+                    Yield val rightNext -> Skip { left, right: Value val, leftNow, rightNow: rightNext }
+                    Skip rightNext -> Skip { left, right, leftNow, rightNow: rightNext }
+                    Stop -> Skip { left, right: Done, leftNow, rightNow }
+
+            (Value left1, Value right1) ->
+                if lessThan left1 right1 then
+                    Yield left1 { left: NoValue, right, leftNow, rightNow }
+                else
+                    Yield right1 { left, right: NoValue, leftNow, rightNow }
+
+            (Value left1, Done) -> Yield left1 { left: NoValue, right, leftNow, rightNow }
+            (Done, Value right1) -> Yield right1 { left, right: NoValue, leftNow, rightNow }
+
+    Stream loop { left: NoValue, right: NoValue, leftNow: left0, rightNow: right0 }
+
+expect mergeSorted ([1, 2, 5] |> fromList) ([3, 4, 6] |> fromList) (\x, y -> x < y) |> toList == [1, 2, 3, 4, 5, 6]
 
 # ## Dictionary-related operations
 
