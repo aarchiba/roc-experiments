@@ -35,8 +35,10 @@ interface Stream exposes [
         firstRest,
         walkUntilStop,
         enumFromTo,
+        closureStream,
         either,
-        thunkStream,
+        dropRepeats,
+        dropRepeatsComparison,
     ] imports []
 
 # ## Functions from Coutts et al.
@@ -349,7 +351,6 @@ expect joinMap ([Red, Fish] |> fromList) (\a -> [a, a] |> fromList) |> toList ==
 # List.intersperse: joinMap and zip
 # List.startsWith: soon
 # List.endsWith: maybe
-# List.split: soon!
 
 ## Split off the first n elements into another stream.
 ##
@@ -449,15 +450,33 @@ expect zip ([Red, Fish] |> fromList) ([Blue, Fish] |> fromList) |> toList == [(R
 
 # ## Other useful functions
 
+## Count by ones, forever.
 countFrom = \n ->
     loop = \n1 ->
         Yield n1 (n1 + 1)
     Stream loop n
 
+## Attach an index to each element of a stream.
+##
+## This uses zip under the hood.
 enumerate = \s -> zip (countFrom 0) s
 
-thunkStream : Stream a s -> Stream a ({} -> Step a s)
-thunkStream = \Stream next s ->
+## Wrap a stream's state in callables.
+##
+## Normally a stream's type includes the type of its
+## internal state. This is necessary so that roc can
+## know what code to run to manipulate it. Unfortunately,
+## this means that you cannot normally do something like
+## if condition then stream1 else stream2; the incompatible
+## types of the two streams' states will cause a type error.
+## This function takes a stream with any internal state
+## and returns an otherwise identical state whose type
+## is independent of the internal state. The performance
+## of this wrapped stream may be less than the original,
+## because the wrapping involves creating a closure at
+## each step.
+closureStream : Stream a s -> Stream a ({} -> Step a s)
+closureStream = \Stream next s ->
     loop = \f ->
         when f {} is
             Yield val s1 -> Yield val (\{} -> next s1)
@@ -465,10 +484,35 @@ thunkStream = \Stream next s ->
             Stop -> Stop
     Stream loop (\{} -> next s)
 
-expect (countFrom 0 |> takeFirst 5 |> toList) == (countFrom 0 |> thunkStream |> takeFirst 5 |> toList)
+expect (countFrom 0 |> takeFirst 5 |> toList) == (countFrom 0 |> closureStream |> takeFirst 5 |> toList)
 
+## Select between two streams based on a condition.
+##
+## This requires wrapping in closureStream.
 either = \Stream nextLeft sLeft, Stream nextRight sRight, which ->
     when which is
-        Left -> thunkStream (Stream nextLeft sLeft)
-        Right -> thunkStream (Stream nextRight sRight)
+        Left -> closureStream (Stream nextLeft sLeft)
+        Right -> closureStream (Stream nextRight sRight)
 
+## Drop repeated values.
+##
+## Values are considered equal if the provided function returns true.
+## Any value that compares equal to the previous value is dropped.
+dropRepeatsComparison : Stream a s, (a, a -> Bool) -> Stream a (s, [NoValue, Some a])
+dropRepeatsComparison = \Stream next s, equal ->
+    loop = \(s1, last) ->
+        when next s1 is
+            Yield val s2 ->
+                when last is
+                    NoValue -> Yield val (s2, Some val)
+                    Some lastVal -> if equal lastVal val then Skip (s2, Some val) else Yield val (s2, Some val)
+
+            Skip s2 -> Skip (s2, last)
+            Stop -> Stop
+    Stream loop (s, NoValue)
+
+## Drop repeated values.
+dropRepeats = \Stream next s -> dropRepeatsComparison (Stream next s) (\x, y -> x == y)
+
+expect countFrom 0 |> dropRepeats |> takeFirst 5 |> toList == [0, 1, 2, 3, 4]
+expect [Red, Red, Fish, Blue, Blue] |> fromList |> dropRepeats |> toList == [Red, Fish, Blue]
