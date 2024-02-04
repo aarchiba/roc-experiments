@@ -1,10 +1,12 @@
 interface Stream exposes [
+        # Basic types and tools
         Stream,
         Step,
         fromList,
         fromListReversed,
         toList,
         toListAppend,
+        empty,
         # Just like List
         isEmpty,
         append,
@@ -18,9 +20,13 @@ interface Stream exposes [
         walkWithIndex,
         sum,
         product,
+        any,
+        all,
         keepIf,
         dropIf,
         countIf,
+        keepOks,
+        keepErrs,
         map,
         first,
         takeFirst,
@@ -33,12 +39,22 @@ interface Stream exposes [
         # Not in List but useful
         splitList,
         firstRest,
-        walkUntilStop,
         enumFromTo,
         closureStream,
         either,
         dropRepeats,
         dropRepeatsComparison,
+        mapMaybe,
+        readFromList,
+        writeToList,
+        # Dictionary-related operations
+        fromDictKeys,
+        fromDictValues,
+        fromDictItems,
+        toDict,
+        readFromDict,
+        readFromDictWithKeys,
+        writeToDict,
     ] imports []
 
 # ## Functions from Coutts et al.
@@ -115,6 +131,9 @@ toList = \Stream next s ->
 
 expect ([Red, Fish, Blue, Fish] |> fromList |> toList) == [Red, Fish, Blue, Fish]
 expect ([Red, Fish, Blue, Fish] |> fromListReversed |> toList) == [Fish, Blue, Fish, Red]
+
+## The empty stream.
+empty = Stream (\{} -> Stop) {}
 
 # ## Replicating selected functions from List
 
@@ -202,7 +221,7 @@ contains = \Stream next s, a ->
 ##
 ## Also known as "fold" in other languages.
 walk = \stream, acc, f ->
-    walkUntilStop stream acc (\acc1, x -> Continue (f acc1 x))
+    walkUntil stream acc (\acc1, x -> Continue (f acc1 x))
 
 ## Walk the elements of a stream and their indices, accumulating a result.
 ##
@@ -211,9 +230,24 @@ walk = \stream, acc, f ->
 walkWithIndex = \stream, acc, f ->
     enumerate stream |> walk acc f
 
-# List.walkWithIndexUntil: soon
+# List.walkWithIndexUntil: just use enumerate and walkUntil
 # List.walkBackwards: probably not.
-# List.walkUntil: soon
+
+## Walk as long as the function says to continue.
+##
+## The function should return Continue acc or Break acc.
+walkUntil = \Stream next s, acc, f ->
+    loop = \s1, acc1 ->
+        when next s1 is
+            Yield val s2 ->
+                when f acc1 val is
+                    Continue acc2 -> loop s2 acc2
+                    Break acc2 -> acc2
+
+            Skip s2 -> loop s2 acc1
+            Stop -> acc1
+    loop s acc
+
 # List.walkBackwardsUntil: probably not.
 # List.walkFrom: just use drop, or fromList with a slice
 # List.walkFromUntil: just use drop, or fromList with a slice
@@ -224,28 +258,38 @@ sum = \stream ->
 product = \stream ->
     walk stream 1 Num.mul
 
-# List.any: soon
-# List.all: soon
+any = \stream, f ->
+    walkUntil stream Bool.false (\_, x -> if f x then Break Bool.true else Continue Bool.false)
+
+all = \stream, f ->
+    walkUntil stream Bool.true (\_, x -> if f x then Continue Bool.true else Break Bool.false)
 
 ## Keep only values that satisfy the predicate.
 keepIf : Stream a s, (a -> Bool) -> Stream a s
-keepIf = \Stream next s, f ->
-    next1 = \s1 ->
-        when next s1 is
-            Yield val s2 -> if f val then Yield val s2 else Skip s2
-            Skip s2 -> Skip s2
-            Stop -> Stop
-    Stream next1 s
+keepIf = \stream, f ->
+    mapMaybe stream (\x -> if f x then Keep x else Drop)
 
 ## Drop values that satisfy the predicate.
+dropIf : Stream a s, (a -> Bool) -> Stream a s
 dropIf = \stream, f ->
-    keepIf stream (\x -> Bool.not (f x))
+    mapMaybe stream (\x -> if f x then Drop else Keep x)
 
 countIf = \stream, f ->
     walk stream 0 (\x, acc -> if f x then acc + 1 else acc)
 
-# List.keepOks: soon
-# List.keepErrs: soon
+keepOks = \stream ->
+    m = \x ->
+        when x is
+            OK val -> Keep val
+            Err _ -> Drop
+    mapMaybe stream m
+
+keepErrs = \stream ->
+    m = \x ->
+        when x is
+            OK _ -> Drop
+            Err val -> Keep val
+    mapMaybe stream m
 
 ## Return a stream whose values have been passed through a function.
 map : Stream a s, (a -> b) -> Stream b s
@@ -286,6 +330,7 @@ takeFirst = \Stream next s0, n0 ->
     Stream next1 { s: s0, n: n0 }
 
 # List.takeLast: maybe
+# queue would be nice
 
 ## Drop the first n values.
 ##
@@ -349,7 +394,7 @@ expect joinMap ([Red, Fish] |> fromList) (\a -> [a, a] |> fromList) |> toList ==
 # List.findLastIndex: probably not
 # List.sublist: drop and take
 # List.intersperse: joinMap and zip
-# List.startsWith: soon
+# List.startsWith: soon, should return the rest of the stream
 # List.endsWith: maybe
 
 ## Split off the first n elements into another stream.
@@ -379,8 +424,8 @@ chunksOf = \Stream next s, n ->
                 Stop -> if List.isEmpty acc then Stop else Yield acc { acc: [], si }
     Stream loop { acc: [], si: s }
 
-# List.mapTry: soon
-# List.walkTry: soon
+# List.mapTry: needs to accumulate everything until success/failure is known
+# List.walkTry: ditto
 
 # ## Not in List but useful
 
@@ -407,18 +452,6 @@ splitList = \Stream next s0, n0 ->
         else
             { before: acc, after: Stream next s }
     loop { s: s0, n: n0, acc: List.withCapacity n0 }
-
-walkUntilStop = \Stream next s, acc, f ->
-    loop = \s1, acc1 ->
-        when next s1 is
-            Yield val s2 ->
-                when f acc1 val is
-                    Continue acc2 -> loop s2 acc2
-                    Stop acc2 -> acc2
-
-            Skip s2 -> loop s2 acc1
-            Stop -> acc1
-    loop s acc
 
 enumFromTo = \from, to1 ->
     loop = \n ->
@@ -516,3 +549,84 @@ dropRepeats = \Stream next s -> dropRepeatsComparison (Stream next s) (\x, y -> 
 
 expect countFrom 0 |> dropRepeats |> takeFirst 5 |> toList == [0, 1, 2, 3, 4]
 expect [Red, Red, Fish, Blue, Blue] |> fromList |> dropRepeats |> toList == [Red, Fish, Blue]
+
+## Read a sequence of values from a list.
+##
+## Takes a stream of indices and produces a stream of values.
+## Invalid indices are skipped.
+readFromList = \stream, list ->
+    pick = \i ->
+        when List.get list i is
+            Ok val -> Keep val
+            Err _ -> Drop
+    mapMaybe stream pick
+
+## Write a sequence of values to a list.
+##
+## Takes pairs of index, element and sets the corresponding
+## element in the list. Invalid indices are skipped.
+##
+## Combined with readFromList, this can be used to shuffle
+## and transform selected elements of a list.
+writeToList = \stream, list ->
+    walk stream list (\list1, (i, val) -> List.set list1 i val)
+
+## Map over a stream, dropping unwanted values.
+##
+## The function can return Keep val1 or Drop.
+mapMaybe = \Stream next s, f ->
+    loop = \s1 ->
+        when next s1 is
+            Yield val s2 ->
+                when f val is
+                    Keep val1 -> Yield val1 s2
+                    Drop -> Skip s2
+
+            Skip s2 -> Skip s2
+            Stop -> Stop
+    Stream loop s
+
+# ## Dictionary-related operations
+
+## Walk a dictionary's keys.
+##
+## Unfortunately this requires creating a list.
+fromDictKeys = \dict ->
+    fromList (Dict.keys dict)
+
+## Walk a dictionary's values.
+##
+## Unfortunately this requires creating a list.
+fromDictValues = \dict ->
+    fromList (Dict.values dict)
+
+## Walk a dictionary's key, value pairs.
+##
+## Unfortunately this requires creating a list.
+fromDictItems = \dict ->
+    fromList (Dict.toList dict)
+
+## Create a dict from a stream of key, value pairs.
+toDict = \stream ->
+    writeToDict stream (Dict.empty {})
+
+## Read a sequence of values from a dict.
+readFromDict = \stream, dict ->
+    pick = \key ->
+        when Dict.get dict key is
+            Ok val -> Keep val
+            Err _ -> Drop
+    mapMaybe stream pick
+
+## Read a sequence of (key, value) pairs from a dict.
+readFromDictWithKeys = \stream, dict ->
+    pick = \key ->
+        when Dict.get dict key is
+            Ok val -> Keep (key, val)
+            Err _ -> Drop
+    mapMaybe stream pick
+
+## Write a sequence of values to a dict.
+writeToDict = \stream, dict ->
+    walk stream dict (\dict1, (key, val) -> Dict.insert dict1 key val)
+
