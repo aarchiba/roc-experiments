@@ -1,23 +1,40 @@
 interface Stream exposes [
-        stream,
-        unstream,
-        map,
-        filter,
-        foldl,
-        foldr,
-        return,
+        Stream,
+        Step,
+        fromList,
+        fromListReversed,
+        toList,
+        toListAppend,
+        # Just like List
+        isEmpty,
         append,
+        prepend,
+        concat,
+        single,
         repeat,
-        take,
-        zip,
-        countFrom,
-        enumerate,
-        concatMap,
-        drop,
-        head,
-        take,
-        unstreamOntoEnd,
-        unsstreamWithCapacity,
+        join,
+        contains,
+        walk,
+        walkWithIndex,
+        sum,
+        product,
+        keepIf,
+        dropIf,
+        countIf,
+        map,
+        first,
+        takeFirst,
+        dropFirst,
+        min,
+        max,
+        joinMap,
+        split,
+        chunksOf,
+        # Not in List but useful
+        splitList,
+        firstRest,
+        walkUntilStop,
+        enumFromTo,
         either,
         thunkStream,
     ] imports []
@@ -25,16 +42,28 @@ interface Stream exposes [
 # ## Functions from Coutts et al.
 
 # ### list conversion to/from
-# It would be great if unstream then stream could be elided
+# It would be great if fromList then toList could be elided
 
-Step a s : [Yield a s, Skip s, Stop]
-Stream a s : [Stream (s -> Step a s) s]
+## Type for representing a stream of values.
+##
+## At a low level, values are produced by a step function.
+## In practice, the hope is that one can normally manipulate streams
+## using the tools in this module.
+Stream valType stateType : [Stream (stateType -> Step valType stateType) stateType]
+
+## Instructions for what the stream should do
+##
+## Typically a step function will take a state and return a new state and a value.
+## It may also return a tag to indicate that this is the end of the stream.
+## Finally it may also return a tag to indicate that, for internal convenience,
+## the state should be updated but that no value should be emitted yet.
+Step valType stateType : [Yield valType stateType, Skip stateType, Stop]
 
 ListIterationState a : { list : List a, n : Nat }
 
-# fromList
-stream : List a -> Stream a (ListIterationState a)
-stream = \ls ->
+## Walk the elements of a list, in order.
+fromList : List a -> Stream a (ListIterationState a)
+fromList = \ls ->
     listNext : ListIterationState a -> Step a (ListIterationState a)
     listNext = \{ list, n } ->
         when List.get list n is
@@ -45,9 +74,30 @@ stream = \ls ->
     start = { list: ls, n: 0nat }
     Stream listNext start
 
-# toListAppend
-unstreamIntoList : Stream a s, List a -> List a
-unstreamIntoList = \Stream next s, list ->
+## Walk the elements of a list, in reverse order.
+##
+## This does not construct a reversed list.
+fromListReversed : List a -> Stream a (ListIterationState a)
+fromListReversed = \ls ->
+    listNext : ListIterationState a -> Step a (ListIterationState a)
+    listNext = \{ list, n } ->
+        if n == 0nat then
+            Stop
+        else
+            nn = n - 1
+            when List.get list nn is
+                Ok val -> Yield val { list, n: nn }
+                Err _ -> crash "index somehow invalid?"
+
+    start : ListIterationState a
+    start = { list: ls, n: List.len ls }
+    Stream listNext start
+
+## Convert a stream to a list, appending to an existing list.
+##
+## This is particularly useful for "toListAppend stream (withCapacity n)".
+toListAppend : Stream a s, List a -> List a
+toListAppend = \Stream next s, list ->
     loop : List a, s -> List a
     loop = \list1, s1 ->
         when next s1 is
@@ -56,59 +106,51 @@ unstreamIntoList = \Stream next s, list ->
             Stop -> list1
     loop list s
 
-# toList
-unstream : Stream a s -> List a
-unstream = \Stream next s ->
-    unstreamIntoList (Stream next s) []
+## Convert a stream to a list.
+toList : Stream a s -> List a
+toList = \Stream next s ->
+    toListAppend (Stream next s) []
 
-expect ([Red, Fish, Blue, Fish] |> stream |> unstream) == [Red, Fish, Blue, Fish]
+expect ([Red, Fish, Blue, Fish] |> fromList |> toList) == [Red, Fish, Blue, Fish]
+expect ([Red, Fish, Blue, Fish] |> fromListReversed |> toList) == [Fish, Blue, Fish, Red]
 
-# ### From Figure 1 & 2
+# ## Replicating selected functions from List
 
-filter : Stream a s, (a -> Bool) -> Stream a s
-filter = \Stream next s, f ->
-    next1 = \s1 ->
-        when next s1 is
-            Yield val s2 -> if f val then Yield val s2 else Skip s2
-            Skip s2 -> Skip s2
-            Stop -> Stop
-    Stream next1 s
+## Test if a stream is empty.
+##
+## Note that this may require processing many elements of the stream
+## to determine if it is empty, and this function does not return the
+## processed stream, so other functions may need to repeat the processing.
+##
+## If you may want to use the stream again, consider using `head` instead.
+isEmpty : Stream a s -> Bool
+isEmpty = \Stream next s ->
+    when next s is
+        Yield _ _ -> Bool.false
+        Skip s1 -> isEmpty (Stream next s1)
+        Stop -> Bool.true
 
-return = \a ->
-    loop = \state ->
-        when state is
-            NotEmitted -> Yield a Emitted
-            Emitted -> Stop
-    Stream loop NotEmitted
+# List.get: doesn't really make sense to implement
+# List.replace: doesn't really make sense to implement
+# List.set: doesn't really make sense to implement
+# List.update: doesn't really make sense to implement
 
-enumFromTo = \from, to1 ->
-    loop = \n ->
-        if n <= to1 then
-            Yield n (n + 1)
-        else
-            Stop
-    Stream loop from
+append = \stream, a ->
+    concat stream (single a)
 
-expect (enumFromTo 1 5 |> unstream) == [1, 2, 3, 4, 5]
+# List.appendIfOk: later
 
-foldr = \Stream next s, b, f ->
-    loop = \acc, s1 ->
-        when next s1 is
-            Yield val s2 -> Yield (loop acc s2 |> f val) s2
-            Skip s2 -> loop acc s2
-            Stop -> acc
-    loop b s
+prepend = \a, stream ->
+    concat (single a) stream
 
-foldl = \Stream next s, b, f ->
-    loop : b, s -> b
-    loop = \acc, s1 ->
-        when next s1 is
-            Yield val s2 -> loop (f acc val) s2
-            Skip s2 -> loop acc s2
-            Stop -> acc
-    loop b s
+# List.prependIfOk: later
+# List.len: definitely don't implement
+# List.withCapacity: nope
+# List.reserve: nope
+# List.releaseExcessCapacity: nope
 
-append = \Stream nextLeft left0, Stream nextRight right0 ->
+## Concatenate two streams.
+concat = \Stream nextLeft left0, Stream nextRight right0 ->
     loop = \running ->
         when running is
             Left left1 ->
@@ -124,27 +166,161 @@ append = \Stream nextLeft left0, Stream nextRight right0 ->
                     Stop -> Stop
     Stream loop (Left left0)
 
-expect ([Red, Fish] |> stream |> append ([Blue, Fish] |> stream) |> unstream) == [Red, Fish, Blue, Fish]
+expect ([Red, Fish] |> fromList |> concat ([Blue, Fish] |> fromList) |> toList) == [Red, Fish, Blue, Fish]
 
-zip = \Stream nextLeft left0, Stream nextRight right0 ->
-    loop = \{ left, right, v } ->
-        when v is
-            NoValue ->
-                when nextLeft left is
-                    Yield val left2 -> Skip { left: left2, right, v: Value1 val }
-                    Skip left2 -> Skip { left: left2, right, v }
-                    Stop -> Stop
+# List.last: later
 
-            Value1 val1 ->
-                when nextRight right is
-                    Yield val2 right2 -> Yield (val1, val2) { left, right: right2, v: NoValue }
-                    Skip right2 -> Skip { left, right: right2, v }
-                    Stop -> Stop
-    Stream loop { left: left0, right: right0, v: NoValue }
+## Create a stream that produces the single provided value and then stops.
+single = \a ->
+    loop = \state ->
+        when state is
+            NotEmitted -> Yield a Emitted
+            Emitted -> Stop
+    Stream loop NotEmitted
 
-expect zip ([Red, Fish] |> stream) ([Blue, Fish] |> stream) |> unstream == [(Red, Blue), (Fish, Fish)]
+## Create a stream that produces the provided value forever.
+repeat = \a -> Stream (\{} -> Yield a {}) {}
 
-concatMap = \Stream next s0, f ->
+# List.reverse: doesn't make sense to implement; see fromListReversed
+
+## Flatten a stream of streams into a single stream.
+join = \stream ->
+    joinMap stream (\x -> x)
+
+## Return whether the stream contains the given value.
+contains = \Stream next s, a ->
+    loop = \s1 ->
+        when next s1 is
+            Yield val s2 -> if val == a then Bool.true else loop s2
+            Skip s2 -> loop s2
+            Stop -> Bool.false
+    loop s
+
+## Walk the elements of a stream, accumulating a result.
+##
+## Also known as "fold" in other languages.
+walk = \stream, acc, f ->
+    walkUntilStop stream acc (\acc1, x -> Continue (f acc1 x))
+
+## Walk the elements of a stream and their indices, accumulating a result.
+##
+## Each element is paired with its index, starting from 0, in a tuple, like
+## (index, element).
+walkWithIndex = \stream, acc, f ->
+    enumerate stream |> walk acc f
+
+# List.walkWithIndexUntil: soon
+# List.walkBackwards: probably not.
+# List.walkUntil: soon
+# List.walkBackwardsUntil: probably not.
+# List.walkFrom: just use drop, or fromList with a slice
+# List.walkFromUntil: just use drop, or fromList with a slice
+
+sum = \stream ->
+    walk stream 0 Num.add
+
+product = \stream ->
+    walk stream 1 Num.mul
+
+# List.any: soon
+# List.all: soon
+
+## Keep only values that satisfy the predicate.
+keepIf : Stream a s, (a -> Bool) -> Stream a s
+keepIf = \Stream next s, f ->
+    next1 = \s1 ->
+        when next s1 is
+            Yield val s2 -> if f val then Yield val s2 else Skip s2
+            Skip s2 -> Skip s2
+            Stop -> Stop
+    Stream next1 s
+
+## Drop values that satisfy the predicate.
+dropIf = \stream, f ->
+    keepIf stream (\x -> Bool.not (f x))
+
+countIf = \stream, f ->
+    walk stream 0 (\x, acc -> if f x then acc + 1 else acc)
+
+# List.keepOks: soon
+# List.keepErrs: soon
+
+## Return a stream whose values have been passed through a function.
+map : Stream a s, (a -> b) -> Stream b s
+map = \Stream next s, f ->
+    next1 = \s1 ->
+        when next s1 is
+            Yield val s2 -> Yield (f val) s2
+            Skip s2 -> Skip s2
+            Stop -> Stop
+    Stream next1 s
+
+# List.map2: use zip
+# List.map3: use zipList
+# List.map4: use zipList
+# List.mapWithIndex: soon
+# List.range: support steps and never ending
+# List.sortWith: not exactly
+# List.sortAsc: not exactly
+# List.sortDesc: not exactly
+# List.swap: no
+
+## Return the first element and discard the rest.
+first = \stream ->
+    when firstRest stream is
+        Ok (val, _) -> Ok val
+        Err _ -> Err StreamWasEmpty
+
+## Return a stream that produces the first n values.
+takeFirst = \Stream next s0, n0 ->
+    next1 = \{ s, n } ->
+        if n > 0 then
+            when next s is
+                Yield val s1 -> Yield val { s: s1, n: n - 1 }
+                Skip s1 -> Skip { s: s1, n }
+                Stop -> Stop
+        else
+            Stop
+    Stream next1 { s: s0, n: n0 }
+
+# List.takeLast: maybe
+
+## Drop the first n values.
+##
+## If the stream has fewer than n values, the result is an empty stream.
+dropFirst = \Stream next s0, n0 ->
+    next1 = \{ s, n } ->
+        if n > 0 then
+            when next s is
+                Yield _ s1 -> Skip { s: s1, n: n - 1 }
+                Skip s1 -> Skip { s: s1, n }
+                Stop -> Stop
+        else
+            when next s is
+                Yield val s1 -> Yield val { s: s1, n }
+                Skip s1 -> Skip { s: s1, n }
+                Stop -> Stop
+    Stream next1 { s: s0, n: n0 }
+
+# List.dropLast: maybe
+# List.dropAt: maybe
+
+min = \stream ->
+    when firstRest stream is
+        Ok (val, rest) ->
+            Ok walk rest val (\acc, x -> if x < acc then x else acc)
+
+        Err _ -> Err StreamWasEmpty
+
+max = \stream ->
+    when firstRest stream is
+        Ok (val, rest) ->
+            Ok walk rest val (\acc, x -> if x > acc then x else acc)
+
+        Err _ -> Err StreamWasEmpty
+
+## Apply a function to each element of a stream and concatenate the results.
+joinMap = \Stream next s0, f ->
     loop = \{ s, inner } ->
         when inner is
             NoInner ->
@@ -163,7 +339,113 @@ concatMap = \Stream next s0, f ->
                     Stop -> Skip { s, inner: NoInner }
     Stream loop { s: s0, inner: NoInner }
 
-expect concatMap ([Red, Fish] |> stream) (\a -> [a, a] |> stream) |> unstream == [Red, Red, Fish, Fish]
+expect joinMap ([Red, Fish] |> fromList) (\a -> [a, a] |> fromList) |> toList == [Red, Red, Fish, Fish]
+
+# List.findFirst: soon
+# List.findLast: soon
+# List.findFirstIndex: probably not
+# List.findLastIndex: probably not
+# List.sublist: drop and take
+# List.intersperse: joinMap and zip
+# List.startsWith: soon
+# List.endsWith: maybe
+# List.split: soon!
+
+## Split off the first n elements into another stream.
+##
+## The first n elements must be stored in a list, internally.
+## Consider splitList to access this first list directly,
+## for example for use in destructuring.
+split = \stream, n ->
+    when splitList stream n is
+        { before, after } -> { before: fromList before, after }
+
+# List.splitFirst: soon
+# List.splitLast: might as well use lists
+
+## Batch a stream into chunks of size n.
+##
+## The last chunk, if any, may have fewer than n elements,
+## but will not be empty.
+chunksOf = \Stream next s, n ->
+    loop = \{ acc, si } ->
+        if List.len acc == n then
+            Yield acc { acc: [], si }
+        else
+            when next si is
+                Yield val si1 -> Skip { acc: List.append acc val, si: si1 }
+                Skip si1 -> Skip { acc, si: si1 }
+                Stop -> if List.isEmpty acc then Stop else Yield acc { acc: [], si }
+    Stream loop { acc: [], si: s }
+
+# List.mapTry: soon
+# List.walkTry: soon
+
+# ## Not in List but useful
+
+## Extract the first element of a stream and the rest.
+firstRest : Stream a s -> Result (a, Stream a s) [StreamWasEmpty]
+firstRest = \Stream next s ->
+    when next s is
+        Yield val s1 -> Ok (val, Stream next s1)
+        Skip s1 -> firstRest (Stream next s1)
+        Stop -> Err StreamWasEmpty
+
+## Split off the first n elements of a stream into a list.
+##
+## If there aren't actually n elements, the list will contain fewer.
+## This is possibly useful for destructuring.
+splitList : Stream a s, Nat -> { before : List a, after : Stream a s }
+splitList = \Stream next s0, n0 ->
+    loop = \{ s, n, acc } ->
+        if n > 0 then
+            when next s is
+                Yield val s1 -> loop { s: s1, n: n - 1, acc: List.append acc val }
+                Skip s1 -> loop { s: s1, n: n - 1, acc }
+                Stop -> { before: acc, after: Stream next s }
+        else
+            { before: acc, after: Stream next s }
+    loop { s: s0, n: n0, acc: List.withCapacity n0 }
+
+walkUntilStop = \Stream next s, acc, f ->
+    loop = \s1, acc1 ->
+        when next s1 is
+            Yield val s2 ->
+                when f acc1 val is
+                    Continue acc2 -> loop s2 acc2
+                    Stop acc2 -> acc2
+
+            Skip s2 -> loop s2 acc1
+            Stop -> acc1
+    loop s acc
+
+enumFromTo = \from, to1 ->
+    loop = \n ->
+        if n <= to1 then
+            Yield n (n + 1)
+        else
+            Stop
+    Stream loop from
+
+expect (enumFromTo 1 5 |> toList) == [1, 2, 3, 4, 5]
+
+zip = \Stream nextLeft left0, Stream nextRight right0 ->
+    loop = \{ left, right, v } ->
+        when v is
+            NoValue ->
+                when nextLeft left is
+                    Yield val left2 -> Skip { left: left2, right, v: Value1 val }
+                    Skip left2 -> Skip { left: left2, right, v }
+                    Stop -> Stop
+
+            Value1 val1 ->
+                when nextRight right is
+                    Yield val2 right2 -> Yield (val1, val2) { left, right: right2, v: NoValue }
+                    Skip right2 -> Skip { left, right: right2, v }
+                    Stop -> Stop
+    Stream loop { left: left0, right: right0, v: NoValue }
+
+expect zip ([Red, Fish] |> fromList) ([Blue, Fish] |> fromList) |> toList == [(Red, Blue), (Fish, Fish)]
 
 # ## Other useful functions
 
@@ -174,61 +456,6 @@ countFrom = \n ->
 
 enumerate = \s -> zip (countFrom 0) s
 
-map : Stream a s, (a -> b) -> Stream b s
-map = \Stream next s, f ->
-    next1 = \s1 ->
-        when next s1 is
-            Yield val s2 -> Yield (f val) s2
-            Skip s2 -> Skip s2
-            Stop -> Stop
-    Stream next1 s
-
-repeat = \a -> Stream (\{} -> Yield a {}) {}
-
-take = \Stream next s0, n0 ->
-    next1 = \{ s, n } ->
-        if n > 0 then
-            when next s is
-                Yield val s1 -> Yield val { s: s1, n: n - 1 }
-                Skip s1 -> Skip { s: s1, n }
-                Stop -> Stop
-        else
-            Stop
-    Stream next1 { s: s0, n: n0 }
-
-drop = \Stream next s0, n0 ->
-    next1 = \{ s, n } ->
-        if n > 0 then
-            when next s is
-                Yield _ s1 -> Skip { s: s1, n: n - 1 }
-                Skip s1 -> Skip { s: s1, n }
-                Stop -> Stop
-        else
-            when next s is
-                Yield val s1 -> Yield val { s: s1, n }
-                Skip s1 -> Skip { s: s1, n }
-                Stop -> Stop
-    Stream next1 { s: s0, n: n0 }
-
-head = \Stream next s ->
-    when next s is
-        Yield val _ -> Ok val
-        Skip s1 -> head (Stream next s1)
-        Stop -> Err OutOfBounds
-
-unstreamOntoEnd : Stream a s, List a -> List a
-unstreamOntoEnd = \Stream next s, list ->
-    loop = \list1, s1 ->
-        when next s1 is
-            Yield val s2 -> loop (List.append list1 val) s2
-            Skip s2 -> loop list1 s2
-            Stop -> list1
-    loop list s
-
-unsstreamWithCapacity : Stream a s, Nat -> List a
-unsstreamWithCapacity = \Stream next s, capacity ->
-    unstreamOntoEnd (Stream next s) (List.withCapacity capacity)
-
 thunkStream : Stream a s -> Stream a ({} -> Step a s)
 thunkStream = \Stream next s ->
     loop = \f ->
@@ -238,104 +465,10 @@ thunkStream = \Stream next s ->
             Stop -> Stop
     Stream loop (\{} -> next s)
 
-expect (countFrom 0 |> take 5 |> unstream) == (countFrom 0 |> thunkStream |> take 5 |> unstream)
+expect (countFrom 0 |> takeFirst 5 |> toList) == (countFrom 0 |> thunkStream |> takeFirst 5 |> toList)
 
 either = \Stream nextLeft sLeft, Stream nextRight sRight, which ->
     when which is
         Left -> thunkStream (Stream nextLeft sLeft)
         Right -> thunkStream (Stream nextRight sRight)
 
-# Can we write a "yield" keyword?
-
-# A YieldValue captures a value and a continuation
-# A function that wants to be inside a generator should
-# return a YieldValue for the first value to be yielded
-# and then a continuation that will be called with {} to
-# get the next value to be yielded, or stop.
-YieldValue a : [YieldValue a ({} -> YieldValue a), Stop]
-
-demoYield : Nat -> YieldValue Nat
-demoYield = \n ->
-    {} <- YieldValue n
-    {} <- YieldValue (n + 1)
-    {} <- YieldValue (n + 2)
-    {} <- YieldValue (n + 3)
-    Stop
-
-demoYield3 = \n ->
-    {} <- YieldValue n
-    demoYield n
-
-# YieldValue functions work recursively
-demoYield4 = \n ->
-    {} <- YieldValue n
-    demoYield4 (n + 2)
-
-# walkYield converts function producing YieldValues into a list
-# directly; this isn't really meant to be used - apply generator,
-# below, to get a stream and then do things with that - but it's
-# useful for testing.
-walkYield : List Nat, YieldValue Nat -> List Nat
-walkYield = \list, thing ->
-    when thing is
-        YieldValue n f -> walkYield (List.append list n) (f {})
-        Stop -> list
-
-expect (walkYield [] (demoYield 1)) == [1, 2, 3, 4]
-expect (walkYield [] (demoYield3 1)) == [1, 1, 2, 3, 4]
-
-# Convert a YieldValue into a Stream; this is probably
-# best used internal to generator, below.
-streamYield : YieldValue a -> Stream a (YieldValue a)
-streamYield = \g ->
-    loop = \yv ->
-        when yv is
-            YieldValue val f -> Yield val (f {})
-            Stop -> Stop
-    Stream loop g
-
-expect (streamYield (demoYield 1) |> unstream) == [1, 2, 3, 4]
-expect (streamYield (demoYield4 1) |> take 4 |> unstream) == [1, 3, 5, 7]
-
-# Test generator yielding the contents of a list
-yieldFromList : List a -> YieldValue a
-yieldFromList = \list ->
-    when list is
-        [] -> Stop
-        [x, .. as xs] ->
-            {} <- YieldValue x
-            yieldFromList xs
-
-expect (streamYield (yieldFromList [1, 2, 3, 4]) |> unstream) == [1, 2, 3, 4]
-
-# This is used to turn a function producing YieldValues into a Stream
-generator = \yv -> streamYield yv
-
-demoYield5 = \n -> generator
-        (
-            {} <- YieldValue n
-            {} <- YieldValue (n + 1)
-            {} <- YieldValue (n + 2)
-            {} <- YieldValue (n + 3)
-            Stop
-        )
-
-expect (demoYield5 1 |> unstream) == [1, 2, 3, 4]
-
-# yieldFrom should take a Stream and produce a YieldValue
-# for each element in the Stream.
-# having some trouble with this one
-# yieldFrom : Stream s a -> YieldValue a
-# yieldFrom = \Stream next s ->
-#     when next s is
-#         Yield val s2 -> YieldValue val (\{} -> yieldFrom (Stream next s2))
-#         Skip s2 -> yieldFrom (Stream next s2)
-#         Stop -> Stop
-
-# demoYield2 : {} -> YieldValue [Red, Blue]
-# demoYield2 = \{} ->
-#     {} <- YieldValue Red
-#     {} <- YieldValue Blue
-#     yieldFrom (streamYield (demoYield2 {}))
-
-# expect streamYield (demoYield2 {}) |> take 5 |> unstream == [Red, Blue, Red, Blue, Red]
